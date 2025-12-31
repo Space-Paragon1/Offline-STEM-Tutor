@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from rag.retriever_vec import build_vec_index, load_vec_index, retrieve_vec
 
 from tools_chem import molar_mass, calc_molarity
 from rag.ingest import ingest_folder
@@ -23,11 +24,13 @@ from rag.retriever_bm25 import (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "model.gguf")
 
+
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DOCS_DIR = os.path.join(DATA_DIR, "docs")
 INDEX_DIR = os.path.join(DATA_DIR, "index")
 CHUNKS_PATH = os.path.join(INDEX_DIR, "chunks.jsonl")
 BM25_PATH = os.path.join(INDEX_DIR, "bm25.pkl")
+VEC_PATH = os.path.join(INDEX_DIR, "vec.pkl")
 
 # -----------------------------
 # App
@@ -69,6 +72,8 @@ llm_error: Optional[str] = None
 
 rag_chunks: List[Dict[str, Any]] = []
 bm25 = None
+vec_index = None
+
 
 
 SYSTEM_PROMPT = """You are an offline STEM tutor.
@@ -166,15 +171,16 @@ def load_llm() -> None:
 def _startup() -> None:
     load_llm()
 
-    # Load RAG index if it exists
-    global rag_chunks, bm25
-    try:
-        if os.path.exists(CHUNKS_PATH):
-            rag_chunks = load_chunks(CHUNKS_PATH)
-        if os.path.exists(BM25_PATH):
-            bm25 = load_bm25_index(BM25_PATH)
-    except Exception as e:
-        print(f"[WARN] Could not load RAG index: {e}")
+    global rag_chunks, bm25, vec_index
+
+    # Load BM25 chunks/index if they exist
+    rag_chunks = load_chunks(CHUNKS_PATH)
+    bm25 = load_bm25_index(BM25_PATH)
+
+    # Load vector (embedding) index if it exists
+    if os.path.exists(VEC_PATH):
+        vec_index = load_vec_index(VEC_PATH)
+
 
 
 @app.get("/health")
@@ -190,6 +196,9 @@ def health():
         "bm25_path_exists": os.path.exists(BM25_PATH),
         "chunks_loaded": len(rag_chunks),
         "bm25_loaded": bm25 is not None,
+        "vec_path_exists": os.path.exists(VEC_PATH),
+        "vec_loaded": vec_index is not None,
+
     }
 
 
@@ -209,6 +218,8 @@ def ingest():
     global rag_chunks, bm25
     rag_chunks = chunks
     bm25 = load_bm25_index(BM25_PATH)
+    global vec_index
+    vec_index = build_vec_index(chunks, VEC_PATH)
 
     return {"ok": True, "chunks": len(chunks), "docs_dir": DOCS_DIR}
 
@@ -323,34 +334,51 @@ def ask(req: AskRequest):
             citations=[],
         )
 
-    # -----------------------------
-    # Retrieval (BM25 RAG)
+        # -----------------------------
+    # Retrieval (Hybrid RAG: BM25 + Vector)
     # -----------------------------
     contexts: List[str] = []
     cites_out: List[Dict[str, Any]] = []
 
-    if bm25 is not None and len(rag_chunks) > 0:
+    contexts_bm25, cites_bm25 = ([], [])
+    contexts_vec, cites_vec = ([], [])
+
+    # 1) BM25 retrieval (keyword)
+    if bm25 is not None and rag_chunks:
         try:
-            contexts, cites = retrieve(question, rag_chunks, bm25, top_k=4)
-
-            # prevent huge context
-            contexts = contexts[:3]
-            contexts = [c[:800] for c in contexts]
-
-            # Convert cite objects to dicts safely
-            for c in cites:
-                cites_out.append(
-                    {
-                        "source": getattr(c, "source", None),
-                        "page": getattr(c, "page", None),
-                        "chunk_id": getattr(c, "chunk_id", None),
-                        "snippet": getattr(c, "snippet", None),
-                    }
-                )
+            contexts_bm25, cites_bm25 = retrieve(question, rag_chunks, bm25, top_k=4)
         except Exception as e:
-            print(f"[WARN] retrieve() failed: {e}")
-            contexts = []
-            cites_out = []
+            print(f"[WARN] BM25 retrieve() failed: {e}")
+
+    # 2) Vector retrieval (semantic)
+    if vec_index is not None and rag_chunks:
+        try:
+            contexts_vec, cites_vec = retrieve_vec(question, rag_chunks, vec_index, top_k=4)
+        except Exception as e:
+            print(f"[WARN] Vector retrieve_vec() failed: {e}")
+
+    # 3) Merge results: BM25 first then vectors; dedupe by chunk_id
+    seen = set()
+    for ctx, c in list(zip(contexts_bm25, cites_bm25)) + list(zip(contexts_vec, cites_vec)):
+        cid = getattr(c, "chunk_id", None) or "unknown"
+        if cid in seen:
+            continue
+        seen.add(cid)
+
+        contexts.append(ctx)
+        cites_out.append(
+            {
+                "source": getattr(c, "source", None),
+                "page": getattr(c, "page", None),
+                "chunk_id": getattr(c, "chunk_id", None),
+                "snippet": getattr(c, "snippet", None),
+            }
+        )
+
+    # 4) Clamp context (avoid slow prompts / stalls)
+    contexts = contexts[:3]
+    contexts = [c[:800] for c in contexts]
+
 
     # -----------------------------
     # Prompt build
