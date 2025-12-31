@@ -1,0 +1,97 @@
+# =========================
+# Python / FastAPI backend
+# =========================
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python tooling
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Local ML models / weights (DO NOT COMMIT)
+# =========================
+backend/models/
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# =========================
+# Extra venv safety (nested envs)
+# =========================
+backend/.venv/
+backend/venv/
+
+
+
+# Databases
+*.sqlite3
+*.db
+
+# =========================
+# RAG (generated artifacts ONLY)
+# =========================
+# Keep your RAG source code, ignore generated data
+backend/rag_data/
+backend/indexes/
+backend/chunks/
+backend/*.faiss
+backend/*.index
+backend/*.pkl
+backend/*.pickle
+
+# =========================
+# Node / Frontend
+# =========================
+node_modules/
+dist/
+dist-ssr/
+
+# =========================
+# Tauri / Rust
+# =========================
+src-tauri/target/
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# =========================
+# Editor files
+# =========================
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+
+.idea
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# =========================
+# Misc
+# =========================
+*.local

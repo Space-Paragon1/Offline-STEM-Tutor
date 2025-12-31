@@ -1,0 +1,225 @@
+:root {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  line-height: 1.4;
+  font-weight: 400;
+  color: #111;
+  background: #f6f7fb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  background: white;
+  border-bottom: 1px solid #e6e8ef;
+}
+
+.title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.subtitle {
+  font-size: 12px;
+  color: #555;
+  margin-top: 2px;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: #444;
+}
+
+.select {
+  padding: 8px 10px;
+  border: 1px solid #d8dbe6;
+  border-radius: 10px;
+  background: white;
+  outline: none;
+}
+
+.select:disabled {
+  opacity: 0.7;
+}
+
+.chat {
+  padding: 16px 18px;
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+}
+
+.msg {
+  background: white;
+  border: 1px solid #e6e8ef;
+  border-radius: 14px;
+  padding: 12px 12px;
+  max-width: 900px;
+}
+
+.msgUser {
+  margin-left: auto;
+  background: #ffffff;
+}
+
+.msgAssistant {
+  margin-right: auto;
+  background: #ffffff;
+}
+
+.msgRole {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+.pill {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid #d8dbe6;
+  border-radius: 999px;
+  color: #333;
+  background: #f6f7fb;
+}
+
+.msgContent {
+  white-space: pre-wrap;
+  font-size: 14px;
+  color: #111;
+}
+
+.composer {
+  background: white;
+  border-top: 1px solid #e6e8ef;
+  padding: 12px 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.error {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #ffd1d1;
+  background: #fff3f3;
+  color: #a30000;
+  font-size: 13px;
+}
+
+.textarea {
+  width: 100%;
+  min-height: 90px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid #d8dbe6;
+  border-radius: 12px;
+  outline: none;
+  font-size: 14px;
+}
+
+.textarea:disabled {
+  background: #f4f5f8;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.button {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid #d8dbe6;
+  background: white;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.primary {
+  border-color: #111;
+  background: #111;
+  color: white;
+}
+
+.hint {
+  font-size: 12px;
+  color: #555;
+}
+
+.citations {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px dashed #d8dbe6;
+  background: #f9fafc;
+}
+
+.citationsTitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: #333;
+  margin-bottom: 6px;
+}
+
+.citationsList {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+}
+
+.citationItem {
+  font-size: 12px;
+  color: #333;
+}
+
+.citationMeta {
+  font-weight: 600;
+}
+
+.citationSource {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.citationSnippet {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #555;
+  white-space: pre-wrap;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
