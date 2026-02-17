@@ -1,13 +1,8 @@
 import { useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import "./App.css";
-import { askTutor, Subject, Mode } from "./api";
-
-type Citation = {
-  source?: string;
-  page?: number;
-  chunk_id?: string;
-  snippet?: string;
-};
+import { askTutor, Subject, Mode, HistoryItem, Citation } from "./api";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -24,7 +19,7 @@ export default function App() {
     {
       role: "assistant",
       content:
-        "Hi! I’m your offline STEM tutor. Pick Chemistry or CS and ask a question.",
+        "Hi! I'm your offline STEM tutor. Pick Chemistry or CS and ask a question.",
     },
   ]);
 
@@ -43,11 +38,21 @@ export default function App() {
     setQuestion("");
     setError("");
 
-    setMessages((prev) => [...prev, { role: "user", content: q, subject }]);
+    const nextMessages: ChatMessage[] = [
+      ...messages,
+      { role: "user", content: q, subject },
+    ];
+    setMessages(nextMessages);
+
+    // Build history from all prior turns (exclude initial greeting, exclude last user msg)
+    const history: HistoryItem[] = nextMessages
+      .slice(0, -1) // exclude the message we just added
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: m.content }));
 
     setIsLoading(true);
     try {
-      const res = await askTutor(q, subject, mode);
+      const res = await askTutor(q, subject, mode, history);
 
       const answerText =
         res.answer?.trim().length > 0
@@ -65,7 +70,7 @@ export default function App() {
     } catch (e: any) {
       setError(
         e?.message ||
-          "Could not reach the Python backend. Make sure it’s running on http://127.0.0.1:8123"
+          "Could not reach the Python backend. Make sure it's running on http://127.0.0.1:8123"
       );
     } finally {
       setIsLoading(false);
@@ -73,7 +78,6 @@ export default function App() {
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    // Enter to send, Shift+Enter for newline
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void onSend();
@@ -134,7 +138,15 @@ export default function App() {
               ) : null}
             </div>
 
-            <div className="msgContent">{m.content}</div>
+            <div className="msgContent">
+              {m.role === "assistant" ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {m.content}
+                </ReactMarkdown>
+              ) : (
+                m.content
+              )}
+            </div>
 
             {m.role === "assistant" &&
               m.citations &&
@@ -149,18 +161,16 @@ export default function App() {
                             {c.source ?? "unknown"}
                           </span>
                           {typeof c.page === "number" && c.page > 0 ? (
-                            <span className="citationPage">p.{c.page}</span>
+                            <span className="citationPage"> p.{c.page}</span>
                           ) : null}
                           {c.chunk_id ? (
                             <span className="citationChunk">
-                              [{c.chunk_id}]
+                              {" "}[{c.chunk_id}]
                             </span>
                           ) : null}
                         </div>
                         {c.snippet ? (
-                          <div className="citationSnippet">
-                            {c.snippet}
-                          </div>
+                          <div className="citationSnippet">{c.snippet}</div>
                         ) : null}
                       </li>
                     ))}
@@ -173,7 +183,7 @@ export default function App() {
         {isLoading && (
           <div className="msg msgAssistant">
             <div className="msgRole">Tutor</div>
-            <div className="msgContent">Thinking…</div>
+            <div className="msgContent thinking">Thinking…</div>
           </div>
         )}
       </main>
