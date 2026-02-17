@@ -109,9 +109,93 @@ body {
 }
 
 .msgContent {
-  white-space: pre-wrap;
   font-size: 14px;
   color: #111;
+}
+
+/* Markdown prose styles inside assistant messages */
+.msgContent p {
+  margin: 0 0 8px 0;
+}
+.msgContent p:last-child {
+  margin-bottom: 0;
+}
+.msgContent ul,
+.msgContent ol {
+  margin: 4px 0 8px 0;
+  padding-left: 20px;
+}
+.msgContent li {
+  margin-bottom: 4px;
+}
+.msgContent h1,
+.msgContent h2,
+.msgContent h3 {
+  margin: 10px 0 4px 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+.msgContent pre {
+  background: #f4f5f8;
+  border: 1px solid #e6e8ef;
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+.msgContent code {
+  background: #f4f5f8;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 13px;
+}
+.msgContent pre code {
+  background: none;
+  padding: 0;
+}
+.msgContent blockquote {
+  border-left: 3px solid #d8dbe6;
+  margin: 6px 0;
+  padding-left: 12px;
+  color: #555;
+}
+.msgContent table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.msgContent th,
+.msgContent td {
+  border: 1px solid #d8dbe6;
+  padding: 6px 10px;
+  text-align: left;
+}
+.msgContent th {
+  background: #f4f5f8;
+  font-weight: 600;
+}
+.msgContent strong {
+  font-weight: 700;
+}
+.msgContent em {
+  font-style: italic;
+}
+
+/* User messages stay plain text */
+.msgUser .msgContent {
+  white-space: pre-wrap;
+}
+
+/* Pulsing thinking indicator */
+.thinking {
+  color: #888;
+  font-style: italic;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 .composer {
