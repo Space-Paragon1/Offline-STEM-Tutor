@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from rag.retriever_vec import build_vec_index, load_vec_index, retrieve_vec
 
 from tools_chem import molar_mass, calc_molarity
 from rag.ingest import ingest_folder
@@ -16,6 +18,7 @@ from rag.retriever_bm25 import (
     load_bm25_index,
     retrieve,
 )
+from tutor.prompts import build_prompt
 
 # -----------------------------
 # Config / Paths
@@ -28,11 +31,90 @@ DOCS_DIR = os.path.join(DATA_DIR, "docs")
 INDEX_DIR = os.path.join(DATA_DIR, "index")
 CHUNKS_PATH = os.path.join(INDEX_DIR, "chunks.jsonl")
 BM25_PATH = os.path.join(INDEX_DIR, "bm25.pkl")
+VEC_PATH = os.path.join(INDEX_DIR, "vec.pkl")
+
+# -----------------------------
+# Globals
+# -----------------------------
+llm = None
+llm_error: Optional[str] = None
+
+rag_chunks: List[Dict[str, Any]] = []
+bm25 = None
+vec_index = None
+
+
+# -----------------------------
+# Request/Response Types
+# -----------------------------
+class HistoryItem(BaseModel):
+    role: str       # "user" or "assistant"
+    content: str
+
+
+class AskRequest(BaseModel):
+    question: str
+    subject: str = "cs"     # "cs" or "chem"
+    mode: str = "explain"   # explain | socratic | hints | quiz
+    history: List[HistoryItem] = []
+
+
+class AskResponse(BaseModel):
+    answer: str
+    citations: List[Dict[str, Any]] = []
+
+
+# -----------------------------
+# LLM loader
+# -----------------------------
+def load_llm() -> None:
+    """Loads llama.cpp model into memory (CPU)."""
+    global llm, llm_error
+    if llm is not None or llm_error is not None:
+        return
+
+    if not os.path.exists(MODEL_PATH):
+        llm_error = f"Model file not found at: {MODEL_PATH}"
+        return
+
+    try:
+        # Disable CPU_REPACK buffer (saves ~1.3 GB RAM in llama-cpp-python 0.3.x)
+        os.environ.setdefault("GGML_CPU_REPACK", "0")
+
+        from llama_cpp import Llama
+
+        llm = Llama(
+            model_path=MODEL_PATH,
+            n_ctx=2048,
+            n_threads=max(1, (os.cpu_count() or 4) // 2),
+            n_batch=64,
+            n_gpu_layers=0,
+            verbose=False,
+        )
+    except Exception as e:
+        llm_error = f"Failed to load model: {e!r}"
+
+
+# -----------------------------
+# Lifespan (replaces deprecated on_event)
+# -----------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    load_llm()
+
+    global rag_chunks, bm25, vec_index
+    rag_chunks = load_chunks(CHUNKS_PATH)
+    bm25 = load_bm25_index(BM25_PATH)
+    if os.path.exists(VEC_PATH):
+        vec_index = load_vec_index(VEC_PATH)
+
+    yield  # app runs here
+
 
 # -----------------------------
 # App
 # -----------------------------
-app = FastAPI(title="Offline STEM Tutor Backend")
+app = FastAPI(title="Offline STEM Tutor Backend", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,136 +129,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
-# Request/Response Types
-# -----------------------------
-class AskRequest(BaseModel):
-    question: str
-    subject: str = "cs"     # "cs" or "chem"
-    mode: str = "explain"   # explain | socratic | hints | quiz
-
-
-class AskResponse(BaseModel):
-    answer: str
-    citations: List[Dict[str, Any]] = []
-
 
 # -----------------------------
-# Globals
+# Formula extraction
 # -----------------------------
-llm = None
-llm_error: Optional[str] = None
-
-rag_chunks: List[Dict[str, Any]] = []
-bm25 = None
-
-
-SYSTEM_PROMPT = """You are an offline STEM tutor.
-Rules:
-- Be clear and step-by-step.
-- If the user asks for practice, give 3 problems and answers at the end.
-- For Chemistry: show units, significant steps, and short explanations.
-- For CS: explain concepts, give small examples, and warn about common mistakes.
-- If you are unsure, say so and ask a brief follow-up question.
-"""
-
-
-def mode_instructions(mode: str) -> str:
-    m = (mode or "explain").strip().lower()
-    if m not in ("explain", "socratic", "hints", "quiz"):
-        m = "explain"
-
-    if m == "explain":
-        return (
-            "Mode: EXPLAIN\n"
-            "- Give a clear, step-by-step explanation.\n"
-            "- Use small examples.\n"
-            "- End with a 2-line summary.\n"
-        )
-
-    if m == "socratic":
-        return (
-            "Mode: SOCRATIC\n"
-            "- Ask 1–3 guiding questions first.\n"
-            "- Do NOT give the final answer immediately.\n"
-            "- If the user insists, give the final answer.\n"
-        )
-
-    if m == "hints":
-        return (
-            "Mode: HINTS\n"
-            "- Give exactly ONE hint.\n"
-            "- Do not give the full solution unless asked.\n"
-            "- End by asking: 'Want another hint or the full solution?'\n"
-        )
-
-    return (
-        "Mode: QUIZ\n"
-        "- Create 3 practice questions.\n"
-        "- Do NOT include answers unless the user asks.\n"
-    )
-
-
 def extract_formula(text: str) -> str | None:
     """
-    Extract a likely chemical formula from a question.
-    Handles parentheses and strips punctuation.
-    Examples: Ca(OH)2, H2SO4, NaCl
+    Extract a chemical formula from a question.
+    Valid formulas must start with an uppercase letter and:
+      - contain at least one digit or parenthesis (e.g. H2O, Ca(OH)2), OR
+      - be a 1-4 char all-alpha token starting uppercase (e.g. NaCl, Fe, KBr)
     """
-    matches = re.findall(r"[A-Za-z][A-Za-z0-9()]*", text)
+    # Match tokens starting with uppercase
+    matches = re.findall(r"\b([A-Z][A-Za-z0-9()]*)\b", text)
     if not matches:
         return None
 
-    matches.sort(key=len, reverse=True)
+    blacklist = {
+        "what", "is", "the", "molar", "mass", "of", "in", "and", "for",
+        "calculate", "find", "give", "with", "molarity", "concentration",
+        "solution", "water", "acid", "base", "salt", "compound", "element",
+        "reaction", "equation", "product", "reactant", "yield", "moles",
+        "grams", "liters", "volume", "answer", "please", "tell", "how",
+        "many", "much", "need", "want", "if", "then", "from", "into",
+    }
 
-    blacklist = {"what", "is", "the", "molar", "mass", "of", "in", "and", "for"}
-    for m in matches:
-        if m.lower() not in blacklist and any(ch.isalpha() for ch in m):
+    def score(m: str) -> tuple:
+        has_formula_chars = any(c.isdigit() or c in "()" for c in m)
+        return (0 if has_formula_chars else 1, -len(m))
+
+    for m in sorted(matches, key=score):
+        if m.lower() not in blacklist:
             return m
 
     return None
 
 
-def load_llm() -> None:
-    """Loads llama.cpp model into memory (CPU)."""
-    global llm, llm_error
-    if llm is not None or llm_error is not None:
-        return
-
-    if not os.path.exists(MODEL_PATH):
-        llm_error = f"Model file not found at: {MODEL_PATH}"
-        return
-
-    try:
-        from llama_cpp import Llama
-
-        # Safer defaults for Windows i5 / 8GB RAM
-        llm = Llama(
-            model_path=MODEL_PATH,
-            n_ctx=1024,  # smaller is faster + avoids stalls
-            n_threads=max(1, (os.cpu_count() or 4) // 2),
-            n_batch=128,
-            verbose=False,
-        )
-    except Exception as e:
-        llm_error = f"Failed to load model: {e!r}"
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    load_llm()
-
-    # Load RAG index if it exists
-    global rag_chunks, bm25
-    try:
-        if os.path.exists(CHUNKS_PATH):
-            rag_chunks = load_chunks(CHUNKS_PATH)
-        if os.path.exists(BM25_PATH):
-            bm25 = load_bm25_index(BM25_PATH)
-    except Exception as e:
-        print(f"[WARN] Could not load RAG index: {e}")
-
-
+# -----------------------------
+# Routes
+# -----------------------------
 @app.get("/health")
 def health():
     return {
@@ -190,6 +181,8 @@ def health():
         "bm25_path_exists": os.path.exists(BM25_PATH),
         "chunks_loaded": len(rag_chunks),
         "bm25_loaded": bm25 is not None,
+        "vec_path_exists": os.path.exists(VEC_PATH),
+        "vec_loaded": vec_index is not None,
     }
 
 
@@ -198,34 +191,17 @@ def ingest():
     os.makedirs(DOCS_DIR, exist_ok=True)
     os.makedirs(INDEX_DIR, exist_ok=True)
 
-    # 1) Create chunks.jsonl from PDFs/TXT/MD in DOCS_DIR
     ingest_folder(DOCS_DIR, CHUNKS_PATH)
 
-    # 2) Load chunks and build BM25 index
     chunks = load_chunks(CHUNKS_PATH)
     build_bm25_index(chunks, BM25_PATH)
 
-    # 3) Put them into memory so /ask can retrieve immediately
-    global rag_chunks, bm25
+    global rag_chunks, bm25, vec_index
     rag_chunks = chunks
     bm25 = load_bm25_index(BM25_PATH)
+    vec_index = build_vec_index(chunks, VEC_PATH)
 
     return {"ok": True, "chunks": len(chunks), "docs_dir": DOCS_DIR}
-
-
-def build_prompt(subject: str, question: str, mode: str) -> str:
-    subject = (subject or "cs").strip().lower()
-    if subject not in ("cs", "chem"):
-        subject = "cs"
-
-    return (
-        f"{SYSTEM_PROMPT}\n"
-        f"{mode_instructions(mode)}\n"
-        f"Subject: {subject}\n"
-        f"User question: {question.strip()}\n"
-        f"Answer:\n"
-        f"(Stop after finishing your answer.)\n"
-    )
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -234,7 +210,6 @@ def ask(req: AskRequest):
 
     question = (req.question or "").strip()
 
-    # ---- DEBUG PRINTS ----
     print("== /ask ==")
     print("subject:", req.subject)
     print("question:", question)
@@ -260,7 +235,7 @@ def ask(req: AskRequest):
                 mm = molar_mass(formula)
                 print("ROUTING -> TOOL: molar_mass")
                 return AskResponse(
-                    answer=f"Molar mass of {formula} ≈ {mm:.3f} g/mol.",
+                    answer=f"Molar mass of **{formula}** ≈ **{mm:.3f} g/mol**.",
                     citations=[],
                 )
             except Exception as e:
@@ -269,8 +244,6 @@ def ask(req: AskRequest):
         # TOOL: molarity
         if "molarity" in q_lower or "molar concentration" in q_lower:
             try:
-                # Very simple extraction rules:
-                # Look for patterns like: "<moles> mol" and "<volume> mL/L"
                 mol_match = re.search(r"([-+]?\d*\.?\d+)\s*(mol|moles?)\b", q_lower)
                 vol_match = re.search(r"([-+]?\d*\.?\d+)\s*(ml|l)\b", q_lower)
 
@@ -282,32 +255,33 @@ def ask(req: AskRequest):
                     M = calc_molarity(moles=moles, volume_value=vol_val, volume_unit=vol_unit)
                     print("ROUTING -> TOOL: calc_molarity (moles/vol)")
                     return AskResponse(
-                        answer=f"Molarity M = n/V = {moles} mol / {vol_val} {vol_unit} = {M:.4f} M",
+                        answer=f"**Molarity** M = n/V = {moles} mol / {vol_val} {vol_unit} = **{M:.4f} M**",
                         citations=[],
                     )
 
-                # Alternative: "molarity of 10 g NaCl in 500 mL"
                 mass_match = re.search(r"([-+]?\d*\.?\d+)\s*(g|grams?)\b", q_lower)
-                vol_match = re.search(r"([-+]?\d*\.?\d+)\s*(ml|l)\b", q_lower)
+                vol_match2 = re.search(r"([-+]?\d*\.?\d+)\s*(ml|l)\b", q_lower)
                 formula = extract_formula(question)
 
-                if mass_match and vol_match and formula:
+                if mass_match and vol_match2 and formula:
                     mass_g = float(mass_match.group(1))
-                    vol_val = float(vol_match.group(1))
-                    vol_unit = vol_match.group(2).upper()
+                    vol_val = float(vol_match2.group(1))
+                    vol_unit = vol_match2.group(2).upper()
 
                     M = calc_molarity(mass_g=mass_g, formula=formula, volume_value=vol_val, volume_unit=vol_unit)
                     print("ROUTING -> TOOL: calc_molarity (grams/formula/vol)")
                     return AskResponse(
-                        answer=f"Molarity ≈ {M:.4f} M (from {mass_g} g of {formula} in {vol_val} {vol_unit})",
+                        answer=f"**Molarity** ≈ **{M:.4f} M** (from {mass_g} g of {formula} in {vol_val} {vol_unit})",
                         citations=[],
                     )
 
                 return AskResponse(
-                    answer="For molarity, tell me either:\n"
-                           "- moles and volume (e.g., '0.5 mol in 250 mL')\n"
-                           "OR\n"
-                           "- grams + formula + volume (e.g., '10 g NaCl in 500 mL')",
+                    answer=(
+                        "For molarity, tell me either:\n"
+                        "- **moles and volume** (e.g., `0.5 mol in 250 mL`)\n\n"
+                        "or\n\n"
+                        "- **grams + formula + volume** (e.g., `10 g NaCl in 500 mL`)"
+                    ),
                     citations=[],
                 )
 
@@ -315,60 +289,73 @@ def ask(req: AskRequest):
                 return AskResponse(answer=f"I couldn't compute molarity: {e}", citations=[])
 
     # -----------------------------
-    # If LLM isn't loaded
+    # LLM not loaded guard
     # -----------------------------
     if llm is None:
         return AskResponse(
-            answer=f"LLM not loaded. Check /health for details. Error: {llm_error}",
+            answer=f"LLM not loaded. Check `/health` for details.\n\nError: `{llm_error}`",
             citations=[],
         )
 
     # -----------------------------
-    # Retrieval (BM25 RAG)
+    # Hybrid RAG retrieval
     # -----------------------------
     contexts: List[str] = []
     cites_out: List[Dict[str, Any]] = []
+    context_blocks: List[Dict[str, Any]] = []
 
-    if bm25 is not None and len(rag_chunks) > 0:
+    contexts_bm25, cites_bm25 = [], []
+    contexts_vec, cites_vec = [], []
+
+    if bm25 is not None and rag_chunks:
         try:
-            contexts, cites = retrieve(question, rag_chunks, bm25, top_k=4)
-
-            # prevent huge context
-            contexts = contexts[:3]
-            contexts = [c[:800] for c in contexts]
-
-            # Convert cite objects to dicts safely
-            for c in cites:
-                cites_out.append(
-                    {
-                        "source": getattr(c, "source", None),
-                        "page": getattr(c, "page", None),
-                        "chunk_id": getattr(c, "chunk_id", None),
-                        "snippet": getattr(c, "snippet", None),
-                    }
-                )
+            contexts_bm25, cites_bm25 = retrieve(question, rag_chunks, bm25, top_k=4)
         except Exception as e:
-            print(f"[WARN] retrieve() failed: {e}")
-            contexts = []
-            cites_out = []
+            print(f"[WARN] BM25 retrieve() failed: {e}")
+
+    if vec_index is not None and rag_chunks:
+        try:
+            contexts_vec, cites_vec = retrieve_vec(question, rag_chunks, vec_index, top_k=4)
+        except Exception as e:
+            print(f"[WARN] Vector retrieve_vec() failed: {e}")
+
+    # Merge: BM25 first, then vectors; dedupe by chunk_id
+    seen: set = set()
+    for ctx, c in list(zip(contexts_bm25, cites_bm25)) + list(zip(contexts_vec, cites_vec)):
+        cid = getattr(c, "chunk_id", None) or "unknown"
+        if cid in seen:
+            continue
+        seen.add(cid)
+        contexts.append(ctx)
+        cite_dict = {
+            "source": getattr(c, "source", None),
+            "page": getattr(c, "page", None),
+            "chunk_id": getattr(c, "chunk_id", None),
+            "snippet": getattr(c, "snippet", None),
+        }
+        cites_out.append(cite_dict)
+        context_blocks.append({
+            "text": ctx[:800],
+            "source": cite_dict["source"],
+            "page": cite_dict["page"],
+        })
+
+    # Clamp to top 3 context blocks
+    context_blocks = context_blocks[:3]
+    cites_out = cites_out[:3]
 
     # -----------------------------
-    # Prompt build
+    # Build prompt via tutor/prompts.py
     # -----------------------------
-    if contexts:
-        rag_block = "\n\n".join(contexts)
-        prompt = (
-            f"{SYSTEM_PROMPT}\n"
-            f"{mode_instructions(req.mode)}\n"
-            f"Subject: {(req.subject or 'cs').strip().lower()}\n"
-            f"Use the CONTEXT to answer. If the answer is not in the context, say you don't know.\n\n"
-            f"CONTEXT:\n{rag_block}\n\n"
-            f"User question: {question}\n"
-            f"Answer (include short citations like [chunk_id] when you use context):\n"
-            f"(Stop after finishing your answer.)\n"
-        )
-    else:
-        prompt = build_prompt(req.subject, question, req.mode)
+    history = [{"role": h.role, "content": h.content} for h in req.history]
+
+    prompt = build_prompt(
+        subject=req.subject,
+        question=question,
+        mode=req.mode,
+        context_blocks=context_blocks if context_blocks else None,
+        history=history if history else None,
+    )
 
     # -----------------------------
     # LLM generate
@@ -376,10 +363,10 @@ def ask(req: AskRequest):
     print("ROUTING -> LLM (slow path)")
     out = llm(
         prompt,
-        max_tokens=192,
+        max_tokens=350,
         temperature=0.2,
         top_p=0.9,
-        stop=["</s>", "\n\nUser:", "\n\nUSER:", "\n\nQuestion:"],
+        stop=["</s>", "\n\nStudent:", "\n\nUser:", "\n\nUSER:", "\n\nQuestion:", "</USER_QUESTION>"],
         echo=False,
     )
 
